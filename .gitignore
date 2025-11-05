@@ -1,0 +1,18 @@
+# Python virtual environments
+vrs_env/
+cv_based_simulation/vrs_env/
+venv/
+.env/
+
+# Compiled files
+__pycache__/
+*.pyc
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Output / results
+results/
+manifests/
