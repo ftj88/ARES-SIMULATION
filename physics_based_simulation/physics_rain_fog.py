@@ -274,26 +274,124 @@ def get_random_nuscenes_image(nuscenes_root, version="v1.0-mini", camera="CAM_FR
     return Image.open(img_path), img_path
 
 def main():
+    # Load a random nuScenes image
     image, img_path = get_random_nuscenes_image("/data/sets/nuscenes")
     print(f"Loaded random nuScenes image: {img_path}")
-    image.show()
 
-    # Optionally provide a depth map (HxW float in meters); if None, approximation is used
-    depth_map = None
+    depth_map = None  # optional depth map
 
-    out_img, fogged_img, Ccam, alpha = apply_paper_faithful_vrs(
-        img_path,
-        depth_map=depth_map,
-        visibility_m=150.0,        # 150 m visibility (adjust to taste)
-        exposure_time_s=0.02,      # 20 ms exposure
-        rain_num_drops=100,       # number of samples (increase for denser rain)
+    # Parameters to explore
+    fog_visibilities = [300.0, 200.0, 100.0, 50.0]
+    ls_modes = ['mean', 'brightest']
+
+    # Rain parameters (kept constant)
+    rain_params = dict(
+        exposure_time_s=0.02,
+        rain_num_drops=100,
         rain_drop_range=(0.3, 5.0),
         fov_deg=60.0,
         near_z=0.5,
         far_z=10.0,
-        downsample_rain=3,         # speed up generation (increase for quality)
-        Ls_mode='mean'
+        downsample_rain=3,
     )
+
+    results = []  # store (ls_mode, vis, final_img)
+    
+    # Generate one consistent rain filter for all
+    print("\nGenerating base rain filter...")
+    temp_img = np.array(image)
+    H, W = temp_img.shape[:2]
+    Ccam = generate_rain_noise_filter(
+        (H, W),
+        fov_deg=rain_params['fov_deg'],
+        exposure_time_s=rain_params['exposure_time_s'],
+        num_drops=rain_params['rain_num_drops'],
+        drop_diameter_mm_range=rain_params['rain_drop_range'],
+        near_z=rain_params['near_z'],
+        far_z=rain_params['far_z'],
+        downsample=rain_params['downsample_rain']
+    )
+
+    # Create a color visualization for the rain filter
+    cmap = plt.get_cmap('viridis')
+    Cvis = (cmap(Ccam)[:, :, :3] * 255).astype(np.uint8)
+
+    # Generate fog + rain images
+    for ls_mode in ls_modes:
+        for vis in fog_visibilities:
+            print(f"\n--- Generating fog+rain: visibility={vis} m, Ls_mode='{ls_mode}' ---")
+
+            fogged_img = add_koschmieder_fog(
+                np.array(image),
+                depth_map=depth_map,
+                visibility_m=vis,
+                Ls_mode=ls_mode,
+                d_near=1.0,
+                d_far=100.0
+            )
+
+            gray_fogged = cv2.cvtColor(fogged_img, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+            muB = float(gray_fogged.mean())
+            rainy_img, alpha = apply_rain_to_image(fogged_img, Ccam, muB=muB, RC=None)
+
+            results.append((ls_mode, vis, rainy_img))
+
+    # -----------------------------------------------------
+    # -----------------------------------------------------
+    # Plot layout:
+    #   2 rows × 5 cols
+    #   Row 0: Original | Rain Filter | mean (300, 200, 100)
+    #   Row 1: mean (50) | brightest (300, 200, 100, 50)
+    # -----------------------------------------------------
+    n_rows, n_cols = 2, 5
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 7))
+
+    # Row 0: Original and Rain filter
+    axes[0, 0].imshow(image)
+    axes[0, 0].set_title("Original")
+    axes[0, 0].axis("off")
+
+    axes[0, 1].imshow(Cvis)
+    axes[0, 1].set_title("Rain Filter (C_cam)")
+    axes[0, 1].axis("off")
+
+    # Collect mean and brightest results
+    mean_results = [(vis, img) for mode, vis, img in results if mode == 'mean']
+    brightest_results = [(vis, img) for mode, vis, img in results if mode == 'brightest']
+
+    # Sort by visibility for consistent order
+    mean_results.sort(key=lambda x: -x[0])
+    brightest_results.sort(key=lambda x: -x[0])
+
+    # Fill remaining columns with fog+rain results
+    # Row 0 → remaining mean results (up to 3)
+    # Row 1 → remaining mean (if any) + all brightest
+    col = 2
+    for vis, img in mean_results[:3]:
+        axes[0, col].imshow(img)
+        axes[0, col].set_title(f"mean\nV={vis} m")
+        axes[0, col].axis("off")
+        col += 1
+
+    # Row 1: mean (if leftover) + all brightest
+    col = 0
+    if len(mean_results) > 3:
+        vis, img = mean_results[3]
+        axes[1, col].imshow(img)
+        axes[1, col].set_title(f"mean\nV={vis} m")
+        axes[1, col].axis("off")
+        col += 1
+
+    for vis, img in brightest_results:
+        axes[1, col].imshow(img)
+        axes[1, col].set_title(f"brightest\nV={vis} m")
+        axes[1, col].axis("off")
+        col += 1
+        if col >= n_cols:
+            break
+
+    plt.tight_layout()
+    plt.show()
 
 # ----------------------------
 # Example usage:
